@@ -39,6 +39,6 @@ HEADERS += \
     shared_context.h \
     shared_globals.h
 
-
+linux:LIBS += -L/usr/lib/x86_64-linux-gnu/ -lboost_system
 mac:INCLUDEPATH += "/usr/local/Cellar/boost/1.72.0_1/include"
 mac:LIBS += -L/usr/local/Cellar/boost/1.72.0_1/lib -lboost_system
