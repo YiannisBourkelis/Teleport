@@ -2,11 +2,16 @@
 #include <iostream>
 #include <thread>
 
+#include "../../shared/byte_functions.h"
 #include "../../shared/payload_types.h"
+#include "../../shared/socket_utils.h"
+#include "server_protocol.h"
 
 Session::Session(tcp::socket socket)
-    : m_socket(std::move(socket))
+    : m_socket(std::move(socket)),
+      header_buffer(HEADER_SIZE)
 {
+    server_protocol::psocket = &m_socket;
 }
 
 Session::~Session()
@@ -16,40 +21,52 @@ Session::~Session()
 
 void Session::start()
 {
-    do_read();
+    server_protocol::sendWelcomeMessage();
+    do_read_header();
 }
 
-void Session::do_read()
+void Session::do_read_header()
 {
     auto self(shared_from_this());
     boost::asio::async_read(m_socket,
-                             boost::asio::buffer(data_),
-                             boost::asio::transfer_exactly(4),
+                             boost::asio::buffer(header_buffer.data(), header_buffer.size()),
+                             boost::asio::transfer_exactly(header_buffer.size()),
         [this, self](boost::system::error_code ec, std::size_t length)
         {
           if (!ec)
           {
-              std::cout << "thread id:" << std::this_thread::get_id() << ", data: " << data_ << " size:" << length << std::endl;
-              std::string str(data_);
-              if (strncmp(&data_[0], payload_types::CONNECT_C ,1) == 0){
-                    std::cout << "equal c" << std::endl;
-              }
-              if (str == "ex\r\n"){
-                  std::cout << "will close socket as requested" << std::endl;
-                  m_socket.close();
-                  return;
-              }
-              if (str == "te\r\n"){
-                  std::cout << "will stop io_service as requested" << std::endl;
-                  globals::io_service.stop();
-                  return;
-              }
-
-              do_write(length);
+              std::cout << "thread id:" << std::this_thread::get_id() << " do_read_header, data: " << data_ << " size:" << length << std::endl;
+              do_read_payload(getPayloadSize(header_buffer));
+          } else {
+              SocketUtils::close_socket(m_socket);
           }
         });
 }
 
+void Session::do_read_payload(size_t payload_length)
+{
+    auto self(shared_from_this());
+
+    _payload_buffer.resize(payload_length);
+
+    boost::asio::async_read(m_socket,
+                             boost::asio::buffer(_payload_buffer.data(), _payload_buffer.size()),
+                             boost::asio::transfer_exactly(_payload_buffer.size()),
+        [this, self](boost::system::error_code ec, std::size_t length)
+        {
+          if (!ec)
+          {
+              std::cout << "thread id:" << std::this_thread::get_id() << " do_read_payload, data: " << data_ << " size:" << length << std::endl;
+              server_protocol::ProcessHeaderAndPayload(header_buffer, _payload_buffer);
+
+              do_read_header();
+          } else {
+              SocketUtils::close_socket(m_socket);
+          }
+        });
+}
+
+/*
 void Session::do_write(std::size_t length)
 {
   auto self(shared_from_this());
@@ -62,3 +79,4 @@ void Session::do_write(std::size_t length)
         }
       });
 }
+*/

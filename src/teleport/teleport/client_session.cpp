@@ -2,6 +2,10 @@
 #include <iostream>
 #include <boost/bind.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
+#include "protocol.h"
+#include "../../shared/payload_types.h"
+#include "../../shared/socket_utils.h"
+#include "../../shared/byte_functions.h"
 
 ClientSession::ClientSession(boost::asio::io_context &io_context) :
     socket_(io_context),
@@ -9,12 +13,13 @@ ClientSession::ClientSession(boost::asio::io_context &io_context) :
     connectionRestrationTimer(io_context)
 {
     state = ClientState::disconnected;
-    boost::system::error_code err;
-    //timer_tick(err);
+    _header_buffer.resize(HEADER_SIZE);
+    Protocol::psocket = &socket_;
 }
 
 void ClientSession::ConnectToServer()
 {
+    std::cout << "inside ConnectToServer" << std::endl;
     tcp::resolver resolver(teleport::io_context);
     boost::system::error_code e;
     server_endpoints = resolver.resolve("localhost", "8087", e);
@@ -29,80 +34,99 @@ void ClientSession::ConnectToServer()
 //void ClientSession::do_connect(const tcp::resolver::results_type& endpoints)
 void ClientSession::do_connect()
 {
+  std::cout << "inside do_connect" << std::endl;
+
   boost::asio::async_connect(socket_, server_endpoints,
       [this](boost::system::error_code ec, tcp::endpoint)
       {
         if (!ec)
         {
-            std::cout << "connected!!!" << std::endl;
+            std::cout << "async_connect >> connected!" << std::endl;
             state = ClientState::connected;
             do_read_header();
         }
         else
         {
-            std::cout << "error on connect!!!" << std::endl;
-            if (socket_.is_open()){
-                socket_.close();
-            }
-            StartConnectionRestrationTimer();
+            std::cout << "async_connect >> error on connect!" << std::endl;
+            SocketUtils::close_socket(socket_);
+            StartConnectionRestorationTimer();
         }
       });
-}
-
-void ClientSession::timer_tick(const boost::system::error_code& error)
-{
-    t.expires_from_now(boost::posix_time::seconds(1));
-    t.async_wait(boost::bind(&ClientSession::timer_tick, this, error));
-    std::cout << "timer tick >> thread id:" << std::this_thread::get_id() << std::endl;
 }
 
 
 void ClientSession::do_read_header()
 {
-  boost::asio::async_read(socket_,
-      boost::asio::buffer(data_, 1024),
-      boost::asio::transfer_exactly(4),
+    std::cout << "inside do_read_header" << std::endl;
+    boost::asio::async_read(socket_,
+                            boost::asio::buffer(_header_buffer, _header_buffer.size()),
+                            boost::asio::transfer_exactly(_header_buffer.size()),
       [this](boost::system::error_code ec, std::size_t )
       {
         if (!ec)
         {
-          std::cout << "will call again do_read_header" << std::endl;
-          do_read_header();
+          std::cout << "do_read_header ok" << std::endl;
+          do_read_payload(getPayloadSize(_header_buffer));
         }
         else
         {
           std::cout << "will close socket" << std::endl;
           state = ClientState::disconnected;
-          socket_.close();
-          StartConnectionRestrationTimer();
+          SocketUtils::close_socket(socket_);
+          StartConnectionRestorationTimer();
         }
       });
 }
 
-void ClientSession::StartConnectionRestrationTimer()
+void ClientSession::do_read_payload(size_t payload_length)
 {
-    if (state == ClientState::connectionRestorationTimerActive)
-    {
-        return;
-    }
+    _payload_buffer.resize(payload_length);
 
-    boost::system::error_code err;
-    connectionRestrationTimer.expires_from_now(boost::posix_time::seconds(1));
-    state = ClientState::connectionRestorationTimerActive;
-    connectionRestrationTimer.async_wait(boost::bind(&ClientSession::ConnectionRestrationTimer_tick, this, err));
+    boost::asio::async_read(socket_,
+                             boost::asio::buffer(_payload_buffer.data(), _payload_buffer.size()),
+                             boost::asio::transfer_exactly(_payload_buffer.size()),
+        [this](boost::system::error_code ec, std::size_t)
+        {
+          if (!ec)
+          {
+              //std::cout << "thread id:" << std::this_thread::get_id() << " do_read_payload, data: " << data_ << " size:" << length << std::endl;
+              std::cout << "do_read_payload ok" << std::endl;
+              Protocol::ProcessHeaderAndPayload(_header_buffer, _payload_buffer);
+
+              do_read_header();
+          } else {
+              SocketUtils::close_socket(socket_);
+              StartConnectionRestorationTimer();
+          }
+        });
 }
-void ClientSession::ConnectionRestrationTimer_tick(const boost::system::error_code& error)
-{
-    if (state == ClientState::connected) {
-        connectionRestrationTimer.cancel();
-        return;
-    }
 
-    std::cout << "ConnectionRestrationTimer_tick >> thread id:" << std::this_thread::get_id() << std::endl;
-    ConnectToServer();
-    connectionRestrationTimer.expires_from_now(boost::posix_time::seconds(1));
+
+void ClientSession::timer_tick(const boost::system::error_code& error)
+{
+    //t.expires_from_now(boost::posix_time::seconds(1));
+    //t.async_wait(boost::bind(&ClientSession::timer_tick, this, error));
+    //std::cout << "timer tick >> thread id:" << std::this_thread::get_id() << std::endl;
+}
+
+void ClientSession::StartConnectionRestorationTimer()
+{
+    std::cout << "inside StartConnectionRestrationTimer" << std::endl;
+    std::cout << "StartConnectionRestrationTimer >> thread id:" << std::this_thread::get_id() << std::endl;
+
     boost::system::error_code err;
-    connectionRestrationTimer.async_wait(boost::bind(&ClientSession::ConnectionRestrationTimer_tick, this, err));
+    connectionRestrationTimer.cancel(); //?????
+    connectionRestrationTimer.expires_from_now(boost::posix_time::seconds(3));
+    connectionRestrationTimer.async_wait(boost::bind(&ClientSession::ConnectionRestorationTimer_tick, this, err));
+}
+void ClientSession::ConnectionRestorationTimer_tick(const boost::system::error_code& error)
+{
+    std::cout << "inside ConnectionRestrationTimer_tick" << std::endl;
+    std::cout << "ConnectionRestrationTimer_tick >> thread id:" << std::this_thread::get_id() << std::endl;
+
+    if (error != boost::asio::error::operation_aborted){
+        ConnectToServer();
+    }
 }
 
 
